@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
+    io::ErrorKind,
     sync::{Arc, Mutex},
 };
 
 use turso_core::{
     io::{FileId, FileSyncType},
-    Buffer, Clock, Completion, File, MonotonicInstant, OpenFlags, WallClockInstant, IO,
+    Buffer, Clock, Completion, CompletionError, File, MonotonicInstant, OpenFlags,
+    WallClockInstant, IO,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +75,24 @@ impl QueuedIo {
         (op.action)()?;
         self.state.history.lock().unwrap().push(event.clone());
         Ok(Some(event))
+    }
+
+    pub(crate) fn fault_after(
+        &self,
+        path_suffix: impl Into<String>,
+        kind: QueuedIoOpKind,
+        allowed_successes: usize,
+    ) {
+        *self.state.fault.lock().unwrap() = Some(QueuedIoFault {
+            path_suffix: path_suffix.into(),
+            kind,
+            allowed_successes,
+            seen: 0,
+        });
+    }
+
+    pub(crate) fn clear_fault(&self) {
+        *self.state.fault.lock().unwrap() = None;
     }
 }
 
@@ -168,7 +188,7 @@ impl QueuedFile {
         let queued_completion = completion.clone();
         let queued_action: Box<dyn FnOnce() -> turso_core::Result<()> + Send> = if fault_this_op {
             Box::new(move || {
-                queued_completion.abort();
+                queued_completion.error(CompletionError::IOError(ErrorKind::Other, "queued_io"));
                 Ok(())
             })
         } else {
